@@ -1,3 +1,4 @@
+
 # Slingshot Brightness (desktop widget)
 
 An angry bird lives on your desktop. Pull it back to the left, let go, and the
@@ -27,3 +28,4 @@ The status line at the bottom-left shows which mode is active.
 Run `python diagnose.py` to see what your hardware supports.
 
 Brightness never goes below 5% (overlay max 85% dark), so the screen can't go black.
+# Modulo---Brightness-Control-Project
