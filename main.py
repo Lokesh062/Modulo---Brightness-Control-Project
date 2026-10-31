@@ -1,14 +1,17 @@
 """Slingshot Brightness - desktop widget edition (Windows 10/11).
 
-Press  Ctrl+Alt+B  anywhere and the slingshot slides up from the bottom of your
-screen. Pull the bird back, let go, and where it lands sets your brightness
-(left = dim, right = bright). After the impact animation it slides away again.
+Press  Ctrl+Space  anywhere (or click the little bird icon in the corner of your
+screen) and the slingshot slides up from the bottom. Pull the bird back, let go,
+and where it lands sets your brightness (left = dim, right = bright). After the
+impact animation it slides away and the corner icon appears so you can reopen it.
 
-  Ctrl+Alt+B   show / hide the slingshot
-  Ctrl+Alt+Q   quit the app
+  Ctrl+Space          show / hide the slingshot  (falls back to Ctrl+` or Ctrl+Alt+B
+                      if another app already owns the shortcut)
+  Corner icon         left-click = open, right-click = menu (Open / Quit)
+  Mouse wheel / Up / Down   nudge brightness by 5% (click the widget first)
 
 Run `python main.py --install` once to create a Desktop shortcut and a Startup
-shortcut (starts hidden at login, so the hotkey is always ready).
+shortcut (starts hidden at login, so the hotkey and corner icon are always ready).
 
 Brightness strategy:
   1. Real hardware brightness via screen-brightness-control (verified after set).
@@ -32,8 +35,11 @@ except Exception:
     sbc = None
 
 # ---------------- settings ----------------
-HOTKEY_VK = 0x42          # 'B'  -> Ctrl+Alt+B toggles the widget
-QUIT_VK = 0x51            # 'Q'  -> Ctrl+Alt+Q quits
+# (modifiers, virtual-key, label) - the first one Windows lets us register wins.
+# modifiers: 1 = Alt, 2 = Ctrl, 4 = Shift
+HOTKEY_CANDIDATES = [(2, 0x20, "Ctrl+Space"), (2, 0xC0, "Ctrl+`"), (3, 0x42, "Ctrl+Alt+B")]
+ICON_CORNER = "bottom-right"   # bottom-right | bottom-left | top-right | top-left
+ICON_SIZE = 78
 AUTO_HIDE_AFTER_THROW = True
 IDLE_HIDE_SECONDS = 15    # hide if you don't touch it
 POWER_BOOST = 1.7         # >1 means 100% is reachable without a full pull
@@ -161,7 +167,7 @@ def install_shortcuts():
          q(exe), q(args_startup), q(folder), q(exe + ",0"))
     subprocess.run(["powershell", "-NoProfile", "-ExecutionPolicy", "Bypass", "-Command", ps])
     print("Created 'Slingshot Brightness' on your Desktop and in your Startup folder.")
-    print("Press Ctrl+Alt+B any time (while the app is running) to summon the slingshot.")
+    print("Press Ctrl+Space any time (or click the corner icon) to summon the slingshot.")
 
 
 def single_instance():
@@ -189,7 +195,7 @@ class App:
         root.withdraw()
         self.W, self.H = root.winfo_screenwidth(), root.winfo_screenheight()
         W, H = self.W, self.H
-        wb = work_bottom(H)
+        wb = self.wb = work_bottom(H)
         self.ground = wb - 52                 # the gauge bar is the ground
         self.ax, self.ay = 170, self.ground - 110
         self.x0 = self.ax + 52                # 0% on the gauge
@@ -214,6 +220,29 @@ class App:
         ov.attributes("-alpha", 0.0)
         ov.update_idletasks()
         click_through(ov)
+
+        # corner icon (visible only while the slingshot is hidden)
+        S = ICON_SIZE
+        ix = W - S - 18 if "right" in ICON_CORNER else 18
+        iy = wb - S - 14 if "bottom" in ICON_CORNER else 14
+        ic = self.icon = tk.Toplevel(root)
+        ic.overrideredirect(True)
+        ic.geometry(f"{S}x{S}+{ix}+{iy}")
+        ic.attributes("-topmost", True)
+        if IS_WIN:
+            ic.attributes("-transparentcolor", KEY)
+        self.icon_cv = tk.Canvas(ic, width=S, height=S, bg=KEY, highlightthickness=0, cursor="hand2")
+        self.icon_cv.pack()
+        self.icon_cv.bind("<Button-1>", lambda e: self.show())
+        self.icon_cv.bind("<Button-3>", self.on_icon_menu)
+        self.icon_cv.bind("<Enter>", lambda e: setattr(self, "icon_hover", True))
+        self.icon_cv.bind("<Leave>", lambda e: setattr(self, "icon_hover", False))
+        self.menu = tk.Menu(root, tearoff=0)
+        self.menu.add_command(label="Open slingshot", command=self.show)
+        self.menu.add_command(label="Quit", command=lambda: setattr(self, "req", "quit"))
+        ic.withdraw()
+        self.icon_shown, self.icon_t, self.icon_h, self.icon_hover = False, 0, 0.0, False
+        self.hotkey_name = None
 
         self.pos = [self.ax, self.ay]
         self.vel = [0.0, 0.0]
@@ -240,7 +269,10 @@ class App:
         self.cv.bind("<ButtonPress-1>", self.on_press)
         self.cv.bind("<B1-Motion>", self.on_move)
         self.cv.bind("<ButtonRelease-1>", self.on_release)
+        self.cv.bind("<MouseWheel>", self.on_wheel)
         win.bind("<Escape>", lambda e: self.hide())
+        win.bind("<Up>", lambda e: self.nudge(5))
+        win.bind("<Down>", lambda e: self.nudge(-5))
 
         self.build_static()
         threading.Thread(target=self.probe, daemon=True).start()
@@ -260,13 +292,17 @@ class App:
         try:
             from ctypes import wintypes
             u = ctypes.windll.user32
-            mods = 0x0001 | 0x0002 | 0x4000          # ALT | CTRL | NOREPEAT
-            self.hotkey_ok = bool(u.RegisterHotKey(None, 1, mods, HOTKEY_VK))
-            u.RegisterHotKey(None, 2, mods, QUIT_VK)
+            for mods, vk, name in HOTKEY_CANDIDATES:
+                if u.RegisterHotKey(None, 1, mods | 0x4000, vk):      # | NOREPEAT
+                    self.hotkey_name, self.hotkey_ok = name, True
+                    break
+            else:
+                self.hotkey_ok = False
+                return
             msg = wintypes.MSG()
             while u.GetMessageW(ctypes.byref(msg), None, 0, 0) > 0:
-                if msg.message == 0x0312:             # WM_HOTKEY
-                    self.req = "toggle" if msg.wParam == 1 else "quit"
+                if msg.message == 0x0312:                              # WM_HOTKEY
+                    self.req = "toggle"
         except Exception:
             self.hotkey_ok = False
 
@@ -319,6 +355,9 @@ class App:
             if self.vis != "hidden":
                 self.win.attributes("-topmost", True)
                 self.win.lift()                # keep the bird above the overlay
+            elif self.icon_shown:
+                self.icon.attributes("-topmost", True)
+                self.icon.lift()
 
     def brightness_from_x(self, x):
         pct = (x - self.x0) / (self.far - self.x0) * 100
@@ -373,6 +412,34 @@ class App:
         if d > MAX_PULL:
             dx, dy = dx / d * MAX_PULL, dy / d * MAX_PULL
         self.pos = [self.ax + dx, min(self.ay + dy, self.ground - R)]
+
+    def on_icon_menu(self, e):
+        try:
+            self.menu.tk_popup(e.x_root, e.y_root)
+        finally:
+            self.menu.grab_release()
+
+    def on_wheel(self, e):
+        if self.vis == "shown" and self.state == "idle":
+            self.nudge(5 if e.delta > 0 else -5)
+
+    def nudge(self, d):
+        if self.vis != "shown" or self.state != "idle":
+            return
+        self.last_active = time.time()
+        b = max(MIN_B, min(100, int(round(self.brightness)) + d))
+        if b == int(round(self.brightness)):
+            return
+        self.brightness = b
+        self.set_brightness(b)
+        x = self.x0 + (self.far - self.x0) * b / 100
+        hue = hue_for(b)
+        self.add("ripple", x, self.ground + 7, 0, 0, 24, 70, hue)
+        for _ in range(6):
+            a = random.uniform(-math.pi, 0)
+            sp = random.uniform(1.5, 4)
+            self.add("spark", x, self.ground, math.cos(a) * sp, math.sin(a) * sp, random.uniform(14, 26),
+                     random.uniform(2, 3.5), mix(hue, "#ffffff", 0.5), g=0.2, drag=0.98)
 
     def on_release(self, e):
         if self.state != "drag":
@@ -435,6 +502,9 @@ class App:
             self.pos[0] += self.vel[0]
             self.pos[1] += self.vel[1]
             self.ang += self.vel[0] / R                       # rolls along the ground
+            if self.pos[1] >= gy - R - 1 and abs(self.vel[0]) > 1.2 and self.frame % 3 == 0:
+                self.add("dust", self.pos[0] - math.copysign(R, self.vel[0]), gy - 4, -self.vel[0] * 0.2,
+                         random.uniform(-0.6, -0.1), 24, 6, "#d8d0c0", drag=0.94)
             if self.pos[0] > self.W - R:
                 self.pos[0], self.vel[0] = self.W - R, -self.vel[0] * 0.4
             if self.pos[0] < self.x0 - 20:
@@ -488,6 +558,7 @@ class App:
             self.vis_t = min(1.0, self.vis_t + 1 / 24)
             if self.vis_t >= 1.0:
                 self.vis = "shown"
+                self.sq, self.sqv = 0.4, 0.0                # little landing squish when it arrives
         elif self.vis == "leaving":
             self.vis_t = max(0.0, self.vis_t - 1 / 18)
             if self.vis_t <= 0.0:
@@ -616,8 +687,12 @@ class App:
         if self.vis == "hidden":
             self.acc = 0.0
             self.update_overlay()
-            self.root.after(60, self.tick)
+            self.sync_icon(True)
+            self.icon_t += 1
+            self.draw_icon()
+            self.root.after(33, self.tick)
             return
+        self.sync_icon(False)
         n = 0
         while self.acc >= STEP:
             self.step()
@@ -627,6 +702,49 @@ class App:
         if n:
             self.draw()
         self.root.after(8, self.tick)
+
+    # ---------- corner icon ----------
+    def sync_icon(self, want):
+        if want and not self.icon_shown:
+            self.icon.deiconify()
+            self.icon.attributes("-topmost", True)
+            self.icon.lift()
+            self.icon_shown, self.icon_t = True, 0
+        elif not want and self.icon_shown:
+            self.icon.withdraw()
+            self.icon_shown = False
+
+    def draw_icon(self):
+        c = self.icon_cv
+        c.delete("all")
+        S = ICON_SIZE
+        cx, cy = S / 2, S / 2 - 5
+        t = self.icon_t
+        self.icon_h += ((1.0 if self.icon_hover else 0.0) - self.icon_h) * 0.3
+        pop = max(0.01, ease_out_back(min(1.0, t / 14)))
+        r = (25 + 3 * self.icon_h) * pop
+        hue = hue_for(self.shown)
+        pulse = (math.sin(t * 0.16) + 1) / 2
+        rr = r + 3 + 5 * pulse
+        c.create_oval(cx - rr, cy - rr, cx + rr, cy + rr, outline=shade(hue, 0.55), width=2)
+        c.create_oval(cx - r, cy - r, cx + r, cy + r, fill="#161b26", outline="#0b0e15", width=3)
+        c.create_arc(cx - r + 5, cy - r + 5, cx + r - 5, cy + r - 5, start=90,
+                     extent=-max(3.0, min(359.0, 3.59 * self.shown)), style="arc", outline=hue, width=3)
+        k = r / 25
+        c.create_polygon(cx - 5 * k, cy - 10 * k, cx - 8 * k, cy - 19 * k, cx - 1 * k, cy - 13 * k,
+                         cx + 2 * k, cy - 21 * k, cx + 4 * k, cy - 11 * k, fill="#7d1511", outline="")
+        c.create_oval(cx - 13 * k, cy - 12 * k, cx + 13 * k, cy + 14 * k, fill="#e0332b", outline="#7d1511", width=2)
+        c.create_oval(cx - 8 * k, cy + 3 * k, cx + 8 * k, cy + 12 * k, fill="#f6dcb4", outline="")
+        c.create_polygon(cx + 10 * k, cy - 1 * k, cx + 19 * k, cy + 3 * k, cx + 10 * k, cy + 6 * k,
+                         fill="#ffd24a", outline="#a35f00")
+        for ex in (cx - 1 * k, cx + 7 * k):
+            c.create_oval(ex - 4 * k, cy - 7 * k, ex + 4 * k, cy + 1 * k, fill="white", outline="#2a0a08")
+            c.create_oval(ex - 0.5 * k, cy - 4.5 * k, ex + 2.5 * k, cy - 1.5 * k, fill="black", outline="")
+        c.create_line(cx - 6 * k, cy - 10 * k, cx + 3 * k, cy - 5 * k, cx + 12 * k, cy - 9 * k,
+                      fill="#1b0b0b", width=max(2, 3 * k), capstyle="round", joinstyle="round")
+        if self.icon_h > 0.15:
+            c.create_text(cx + 1, S - 8, text="Open", fill="#000000", font=("Segoe UI", 8, "bold"))
+            c.create_text(cx, S - 9, text="Open", fill="#ffffff", font=("Segoe UI", 8, "bold"))
 
     # ---------- drawing helpers ----------
     def label(self, x, y, text, size=11, anchor="nw", color="#ffffff"):
@@ -740,7 +858,7 @@ class App:
                             fill="#3a2414", outline="#1a0e06", width=2)
 
     # ---------- bird ----------
-    def draw_bird(self, x, y, a, look=(0.0, 0.0), sx=1.0, sy=1.0):
+    def draw_bird(self, x, y, a, look=(0.0, 0.0), sx=1.0, sy=1.0, blink=False):
         c = self.cv
         ca, sa = math.cos(a), math.sin(a)
 
@@ -766,6 +884,9 @@ class App:
         c.create_polygon(T([(R - 7, 5), (R + 8, 5), (R - 4, 12)]), fill="#f0961a", outline="#a35f00", width=1)
         lx, ly = look
         for ex in (2, 12):                                                                                # eyes
+            if blink:
+                c.create_line(*T([(ex - 5, -3), (ex + 5, -3)]), fill="#1b0b0b", width=3, capstyle="round")
+                continue
             circ(ex, -4, 6.4, fill="#ffffff", outline="#2a0a08", width=1)
             circ(ex + 1.5 + lx, -3.5 + ly, 2.9, fill="#111111", outline="")
         c.create_line(*T([(-5, -15), (8, -8), (20, -13)]), fill="#1b0b0b", width=5, capstyle="round",
@@ -842,6 +963,8 @@ class App:
         c.create_rectangle(x0 - 2, gy - 1, far + 2, gy + 15, outline="#0e121a", width=3)
         hue = hue_for(self.shown)
         self.bubble(xs, gy - 28, f"{int(round(self.shown))}%", hue, size=10)
+        c.create_line(xs, gy + 1, xs, gy + 13, fill=shade(hue, 0.6), width=6)
+        c.create_line(xs, gy + 1, xs, gy + 13, fill="#ffffff", width=2)
         c.create_polygon(xs, gy - 1, xs - 6, gy - 14, xs + 6, gy - 14, fill="#ffffff", outline="#10151f", width=2)
 
     def draw_guide(self):
@@ -880,6 +1003,9 @@ class App:
 
         if self.state == "drag":
             self.draw_guide()
+            px, py = self.pos
+            c.create_arc(px - R - 14, py - R - 14, px + R + 14, py + R + 14, start=90,
+                         extent=-max(3.0, 358 * stretch), style="arc", outline=mix(COOL, WARM, stretch), width=3)
 
         bx, by = self.pos
         air = max(0.0, gy - (by + R))
@@ -889,7 +1015,7 @@ class App:
         if self.state in ("idle", "drag"):
             if self.state == "idle":
                 by += 1.6 * math.sin(self.frame * 0.08)
-                a, sx, sy = 0.0, 1.0, 1.0
+                a, sx, sy = 0.0, 1 + 0.30 * self.sq, 1 - 0.34 * self.sq
             else:
                 a = math.atan2(ay - by, ax - bx)
                 sx, sy = 1 + 0.12 * stretch, 1 - 0.1 * stretch
@@ -899,7 +1025,8 @@ class App:
             l = min(2.2, d / 60 * 2.2)
             ca, sa = math.cos(a), math.sin(a)
             gx, gyy = mx / d * l, my / d * l
-            self.draw_bird(bx, by, a, look=(gx * ca + gyy * sa, -gx * sa + gyy * ca), sx=sx, sy=sy)
+            self.draw_bird(bx, by, a, look=(gx * ca + gyy * sa, -gx * sa + gyy * ca), sx=sx, sy=sy,
+                           blink=(self.state == "idle" and self.frame % 230 < 7))
         elif self.state == "fly":
             st = min(0.18, math.hypot(*self.vel) / 120)
             self.draw_bird(bx, by, self.ang, look=(2.0, 0.0), sx=1 + st, sy=1 - st * 0.7)
@@ -924,12 +1051,14 @@ class App:
         modes = {"checking": "Detecting display...", "real": "Real brightness control",
                  "overlay": "Overlay dimming mode"}
         self.label(self.x0 + 10, gy - 92, modes[self.mode], size=11)
-        hint = ("Ctrl+Alt+B show/hide  |  Ctrl+Alt+Q quit" if self.hotkey_ok is not False
-                else "Hotkey Ctrl+Alt+B is used by another app")
+        hint = ((f"{self.hotkey_name or HOTKEY_CANDIDATES[0][2]} show/hide  |  wheel or Up/Down = 5% steps")
+                if self.hotkey_ok is not False else "No free hotkey - use the corner icon to reopen")
         self.label(self.x0 + 10, gy - 74, hint, size=8)
         for cx, txt in ((28, "-"), (60, "X")):
             c.create_oval(cx - 12, gy - 24, cx + 12, gy, fill="#222733", outline="white", width=2)
             c.create_text(cx, gy - 12, text=txt, fill="white", font=("Segoe UI", 10, "bold"))
+        self.label(28, gy + 5, "hide", size=7, anchor="n")
+        self.label(60, gy + 5, "quit", size=7, anchor="n")
 
         # screen-level offset: slide in/out + impact shake
         if self.vis == "entering":
