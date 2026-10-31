@@ -1003,9 +1003,6 @@ class App:
 
         if self.state == "drag":
             self.draw_guide()
-            px, py = self.pos
-            c.create_arc(px - R - 14, py - R - 14, px + R + 14, py + R + 14, start=90,
-                         extent=-max(3.0, 358 * stretch), style="arc", outline=mix(COOL, WARM, stretch), width=3)
 
         bx, by = self.pos
         air = max(0.0, gy - (by + R))
